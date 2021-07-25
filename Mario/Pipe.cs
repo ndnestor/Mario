@@ -92,19 +92,11 @@ namespace Mario {
 					// TODO: This shouldn't happen. Log a warning or throw an error
 					return;
 			}
-			
-			// Create the pipe writer and reader
-			//_pipeInReader = new StreamReader(_pipeIn);
-			//_pipeOutWriter = new StreamWriter(_pipeOut);
-			
+
+			// Initialize the data transfer
 			switch(_pipeSettings.FlowDirection) {
 				case FlowDirection.In:
 					startInFlow();
-					
-					// Set up timer that reads pipe every ReadPipeInterval milliseconds
-					_readPipeTimer.Interval = _pipeSettings.FlowInterval;
-					_readPipeTimer.Elapsed += FlowIn;
-					_readPipeTimer.AutoReset = true;
 					break;
 				case FlowDirection.Out:
 					startOutFlow();
@@ -112,12 +104,15 @@ namespace Mario {
 				case FlowDirection.Bidirectional:
 					startInFlow();
 					startOutFlow();
-					
-					// Set up timer that reads pipe every ReadPipeInterval milliseconds
-					_readPipeTimer.Interval = _pipeSettings.FlowInterval;
-					_readPipeTimer.Elapsed += FlowIn;
-					_readPipeTimer.AutoReset = true;
 					break;
+			}
+
+			// Start the read pipe timer if necessary
+			if(_pipeSettings.FlowDirection is FlowDirection.Bidirectional or FlowDirection.In) {
+				// Set up timer that reads pipe every ReadPipeInterval milliseconds
+				_readPipeTimer.Interval = _pipeSettings.FlowInterval;
+				_readPipeTimer.Elapsed += FlowIn;
+				_readPipeTimer.AutoReset = true;
 			}
 		}
 		// Read from the pipe
@@ -147,7 +142,9 @@ namespace Mario {
 			
 			// Add messages to message buffer
 			if(_pipeSettings.SaveContents) {
+				_messageBufferMutex.WaitOne();
 				_messageBuffer.AddRange(pipeMessageLines);
+				_messageBufferMutex.ReleaseMutex();
 			}
 
 			// Call callback to send read messages to end-user
@@ -157,7 +154,7 @@ namespace Mario {
 		
 		// Returns the message buffer in a thread safe manner
 		// TODO: Add timeout time using parameter
-		public string[] GetContents() {
+		public string[] GetContents(bool clearContents=false) {
 			if(!_pipeSettings.SaveContents) {
 				// TODO: Throw error
 				return null;
@@ -165,35 +162,33 @@ namespace Mario {
 			
 			_messageBufferMutex.WaitOne();
 			string[] contents = _messageBuffer.ToArray();
+
+			if(clearContents) {
+				_messageBuffer.Clear();
+			}
 			_messageBufferMutex.ReleaseMutex();
 
 			return contents;
 		}
 
-		// Clears the message buffer in a thread safe manner
-		// TODO: Add timeout time using parameter
-		public void ClearContents() {
-			if(!_pipeSettings.SaveContents) {
-				// TODO: Throw error
-				return;
-			}
-			
-			_messageBufferMutex.WaitOne();
-			_messageBuffer.Clear();
-			_messageBufferMutex.ReleaseMutex();
-		}
-
 		// Write to the pipe
-		public void FlowOut(string message) {
+		public void FlowOut(IEnumerable<string> messages) {
 			
 			// Send the SYNC message to let recipient know a new message is being sent
 			_pipeOutWriter.WriteLine("SYNC");
 			_pipeOut.WaitForPipeDrain();
 
-			// Send the message
-			_pipeOutWriter.WriteLine(message);
+			// Send the message(s)
+			foreach(string message in messages) {
+				_pipeOutWriter.WriteLine(message);
+			}
 			_pipeOutWriter.WriteLine("END");
 			_pipeOutWriter.Flush();
+		}
+		
+		// Single message overload of FlowOut(string[] messages)
+		public void FlowOut(string message) {
+			FlowOut(new string[] {message});
 		}
 
 	}
