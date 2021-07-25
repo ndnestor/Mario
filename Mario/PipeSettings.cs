@@ -3,7 +3,7 @@ using System.Diagnostics;
 
 namespace Mario {
 	public class PipeSettings {
-		public int FlowInterval = 1; // In milliseconds
+		public int FlowInterval = 33; // In milliseconds
 		public bool SaveContents = true;
 		public Process TargetProcess = null;
 		public Action<string[]> FlowInCallback = (string[] _) => { /* Intentionally empty */ };
