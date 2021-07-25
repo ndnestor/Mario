@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipes;
+using System.Linq;
 using System.Threading;
 using System.Timers;
 using Timer = System.Timers.Timer;
@@ -52,13 +53,13 @@ namespace Mario {
 					startInFlow = () => {
 						if(_pipeSettings.TargetProcess == null) {
 							
-							// This is the client process
+							// This is for the client process
 							string pipeInHandle = cmdArgs[2];
 							_pipeIn = new AnonymousPipeClientStream(PipeDirection.In, pipeInHandle);
 							_pipeInReader = new StreamReader(_pipeIn);
 						} else {
 							
-							// This is the server process
+							// This is for the server process
 							_pipeIn = new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.Inheritable);
 							_pipeInReader = new StreamReader(_pipeIn);
 						}
@@ -69,17 +70,16 @@ namespace Mario {
 					startOutFlow = () => {
 						if(_pipeSettings.TargetProcess == null) {
 							
-							// This is the client process
+							// This is for the client process
 							string pipeOutHandle = cmdArgs[1];
 							_pipeOut = new AnonymousPipeClientStream(PipeDirection.Out, pipeOutHandle);
 							_pipeOutWriter = new StreamWriter(_pipeOut);
 						} else {
 							
-							// This is the server process
+							// This is for the server process
 							_pipeOut = new AnonymousPipeServerStream(PipeDirection.Out, HandleInheritability.Inheritable);
 							_pipeOutWriter = new StreamWriter(_pipeOut);
 							
-							// TODO: Figure how to shorten this long command
 							_pipeSettings.TargetProcess.StartInfo.Arguments =
 								$"{((AnonymousPipeServerStream)_pipeIn).GetClientHandleAsString()} " +
 								$"{((AnonymousPipeServerStream)_pipeOut).GetClientHandleAsString()}";
@@ -89,8 +89,8 @@ namespace Mario {
 					};
 					break;
 				default:
-					// TODO: This shouldn't happen. Log a warning or throw an error
-					return;
+					throw new NotImplementedException(
+						$"Connection type \"{_pipeSettings.ConnectionType}\" has not been implemented yet");
 			}
 
 			// Initialize the data transfer
@@ -109,7 +109,8 @@ namespace Mario {
 
 			// Start the read pipe timer if necessary
 			if(_pipeSettings.FlowDirection is FlowDirection.Bidirectional or FlowDirection.In) {
-				// Set up timer that reads pipe every ReadPipeInterval milliseconds
+				
+				// Set up timer that reads pipe every FlowInterval milliseconds
 				_readPipeTimer.Interval = _pipeSettings.FlowInterval;
 				_readPipeTimer.Elapsed += FlowIn;
 				_readPipeTimer.AutoReset = true;
@@ -123,7 +124,7 @@ namespace Mario {
 		
 			// Check for sync message
 			string pipeMessage = _pipeInReader.ReadLine();
-			if(pipeMessage == null || !pipeMessage.StartsWith("SYNC")) {
+			if(pipeMessage is not "SYNC") {
 			
 				// No message was found
 				_flowInMutex.ReleaseMutex();
@@ -135,7 +136,7 @@ namespace Mario {
 			do {
 				pipeMessage = _pipeInReader.ReadLine();
 				pipeMessageLines.Add(pipeMessage);
-			} while(pipeMessage != null && !pipeMessage.StartsWith("END"));
+			} while(pipeMessage != null && pipeMessage != "END");
 		
 			// Allow pipe reading from other threads
 			_flowInMutex.ReleaseMutex();
@@ -155,24 +156,40 @@ namespace Mario {
 		// Returns the message buffer in a thread safe manner
 		// TODO: Add timeout time using parameter
 		public string[] GetContents(bool clearContents=false) {
+			
+			// Throw error if given an improper argument
 			if(!_pipeSettings.SaveContents) {
-				// TODO: Throw error
-				return null;
+				throw new InvalidOperationException(
+					"Cannot use GetContents method on a pipe that does not save its contents." +
+					" This can be fixed in the pipe settings");
 			}
 			
+			// Lock the message buffer
 			_messageBufferMutex.WaitOne();
+			
+			// Get the contents of the message buffer
 			string[] contents = _messageBuffer.ToArray();
 
+			// Clear the message buffer if needed
 			if(clearContents) {
 				_messageBuffer.Clear();
 			}
+			
+			// Unlock the message buffer
 			_messageBufferMutex.ReleaseMutex();
 
 			return contents;
 		}
 
 		// Write to the pipe
-		public void FlowOut(IEnumerable<string> messages) {
+		public void FlowOut(IList<string> messages) {
+			
+			// Throw error if given an improper argument
+			if(messages == null) {
+				throw new ArgumentNullException(nameof(messages), "Messages list cannot be null");
+			} else if(!messages.Any()) {
+				throw new ArgumentException("Messages list must contain at least one element");
+			}
 			
 			// Send the SYNC message to let recipient know a new message is being sent
 			_pipeOutWriter.WriteLine("SYNC");
@@ -188,7 +205,11 @@ namespace Mario {
 		
 		// Single message overload of FlowOut(string[] messages)
 		public void FlowOut(string message) {
-			FlowOut(new string[] {message});
+			// Throw error if given an improper argument
+			if(message == null) {
+				throw new ArgumentNullException(nameof(message), "Message cannot be null");
+			}
+			FlowOut(new string[] { message });
 		}
 
 	}
