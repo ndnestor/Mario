@@ -1,24 +1,15 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using System.Threading;
 using System.Timers;
+using Timer = System.Timers.Timer;
 
 namespace Mario {
 	public class Pipe {
 
-		// Pipe settings
-		// TODO: Set defaults
-		public class PipeSettings {
-			public Process targetProcess;
-			public int flowInterval; // In milliseconds
-			public Action<string[]> flowInCallback;
-			public ConnectionType connectionType;
-			public FlowDirection flowDirection;
-		}
-
-		private PipeSettings _pipeSettings;
+		private readonly PipeSettings _pipeSettings;
 
 		public enum ConnectionType {
 			CmdArgs
@@ -36,41 +27,15 @@ namespace Mario {
 		private StreamReader _pipeInReader;
 		private StreamWriter _pipeOutWriter;
 		private readonly Timer _readPipeTimer = new();
+		private readonly Mutex _flowInMutex = new();
+		private readonly Mutex _messageBufferMutex = new();
+		private readonly List<string> _messageBuffer = new();
 		
 		// Constructor
 		public Pipe(PipeSettings pipeSettings) {
 			
 			// Set pipe settings
 			_pipeSettings = pipeSettings;
-
-			// Initialize pipe infrastructure
-			/*void InitFlowIn() {
-				_pipeIn = new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.Inheritable);
-				_pipeInReader = new StreamReader(_pipeIn);
-				
-				// Set up timer that reads pipe every ReadPipeInterval milliseconds
-				_readPipeTimer.Interval = _pipeSettings.flowInterval;
-				_readPipeTimer.Elapsed += FlowIn;
-				_readPipeTimer.AutoReset = true;
-			}
-
-			void InitFlowOut() {
-				_pipeOut = new AnonymousPipeServerStream(PipeDirection.Out, HandleInheritability.Inheritable);
-				_pipeOutWriter = new StreamWriter(_pipeOut);
-			}
-			
-			switch(pipeSettings.flowDirection) {
-				case FlowDirection.In:
-					InitFlowIn();
-					break;
-				case FlowDirection.Out:
-					InitFlowOut();
-					break;
-				case FlowDirection.Bidirectional:
-					InitFlowOut();
-					InitFlowIn();
-					break;
-			}*/
 		}
 
 		// Starts the transfer of data
@@ -79,17 +44,18 @@ namespace Mario {
 			Action startInFlow;
 			Action startOutFlow;
 
-			switch(_pipeSettings.connectionType) {
+			switch(_pipeSettings.ConnectionType) {
 				case ConnectionType.CmdArgs:
 
 					string[] cmdArgs = Environment.GetCommandLineArgs();
 					
 					startInFlow = () => {
-						if(_pipeSettings.targetProcess == null) {
+						if(_pipeSettings.TargetProcess == null) {
 							
 							// This is the client process
-							string pipeInHandle = cmdArgs[1];
+							string pipeInHandle = cmdArgs[2];
 							_pipeIn = new AnonymousPipeClientStream(PipeDirection.In, pipeInHandle);
+							_pipeInReader = new StreamReader(_pipeIn);
 						} else {
 							
 							// This is the server process
@@ -101,22 +67,24 @@ namespace Mario {
 					};
 
 					startOutFlow = () => {
-						if(_pipeSettings.targetProcess == null) {
+						if(_pipeSettings.TargetProcess == null) {
 							
 							// This is the client process
-							string pipeOutHandle = cmdArgs[0];
+							string pipeOutHandle = cmdArgs[1];
 							_pipeOut = new AnonymousPipeClientStream(PipeDirection.Out, pipeOutHandle);
+							_pipeOutWriter = new StreamWriter(_pipeOut);
 						} else {
 							
 							// This is the server process
 							_pipeOut = new AnonymousPipeServerStream(PipeDirection.Out, HandleInheritability.Inheritable);
-
+							_pipeOutWriter = new StreamWriter(_pipeOut);
+							
 							// TODO: Figure how to shorten this long command
-							_pipeSettings.targetProcess.StartInfo.Arguments =
+							_pipeSettings.TargetProcess.StartInfo.Arguments =
 								$"{((AnonymousPipeServerStream)_pipeIn).GetClientHandleAsString()} " +
 								$"{((AnonymousPipeServerStream)_pipeOut).GetClientHandleAsString()}";
 							
-							_pipeSettings.targetProcess.Start();
+							_pipeSettings.TargetProcess.Start();
 						}
 					};
 					break;
@@ -126,15 +94,15 @@ namespace Mario {
 			}
 			
 			// Create the pipe writer and reader
-			_pipeInReader = new StreamReader(_pipeIn);
-			_pipeOutWriter = new StreamWriter(_pipeOut);
+			//_pipeInReader = new StreamReader(_pipeIn);
+			//_pipeOutWriter = new StreamWriter(_pipeOut);
 			
-			switch(_pipeSettings.flowDirection) {
+			switch(_pipeSettings.FlowDirection) {
 				case FlowDirection.In:
 					startInFlow();
 					
 					// Set up timer that reads pipe every ReadPipeInterval milliseconds
-					_readPipeTimer.Interval = _pipeSettings.flowInterval;
+					_readPipeTimer.Interval = _pipeSettings.FlowInterval;
 					_readPipeTimer.Elapsed += FlowIn;
 					_readPipeTimer.AutoReset = true;
 					break;
@@ -146,7 +114,7 @@ namespace Mario {
 					startOutFlow();
 					
 					// Set up timer that reads pipe every ReadPipeInterval milliseconds
-					_readPipeTimer.Interval = _pipeSettings.flowInterval;
+					_readPipeTimer.Interval = _pipeSettings.FlowInterval;
 					_readPipeTimer.Elapsed += FlowIn;
 					_readPipeTimer.AutoReset = true;
 					break;
@@ -155,27 +123,77 @@ namespace Mario {
 		// Read from the pipe
 		private void FlowIn(object sender, ElapsedEventArgs e) {
 			
+			// Prevent trying to read the pipe from another thread
+			_flowInMutex.WaitOne();
+		
 			// Check for sync message
 			string pipeMessage = _pipeInReader.ReadLine();
 			if(pipeMessage == null || !pipeMessage.StartsWith("SYNC")) {
-				
+			
 				// No message was found
+				_flowInMutex.ReleaseMutex();
 				return;
 			}
-			
+		
 			// Get all messages in the pipe
 			List<string> pipeMessageLines = new();
 			do {
 				pipeMessage = _pipeInReader.ReadLine();
 				pipeMessageLines.Add(pipeMessage);
 			} while(pipeMessage != null && !pipeMessage.StartsWith("END"));
+		
+			// Allow pipe reading from other threads
+			_flowInMutex.ReleaseMutex();
+			
+			// Add messages to message buffer
+			if(_pipeSettings.SaveContents) {
+				_messageBuffer.AddRange(pipeMessageLines);
+			}
 
-			_pipeSettings.flowInCallback(pipeMessageLines.ToArray());
+			// Call callback to send read messages to end-user
+			_pipeSettings.FlowInCallback(pipeMessageLines.ToArray());
+
+		}
+		
+		// Returns the message buffer in a thread safe manner
+		// TODO: Add timeout time using parameter
+		public string[] GetContents() {
+			if(!_pipeSettings.SaveContents) {
+				// TODO: Throw error
+				return null;
+			}
+			
+			_messageBufferMutex.WaitOne();
+			string[] contents = _messageBuffer.ToArray();
+			_messageBufferMutex.ReleaseMutex();
+
+			return contents;
+		}
+
+		// Clears the message buffer in a thread safe manner
+		// TODO: Add timeout time using parameter
+		public void ClearContents() {
+			if(!_pipeSettings.SaveContents) {
+				// TODO: Throw error
+				return;
+			}
+			
+			_messageBufferMutex.WaitOne();
+			_messageBuffer.Clear();
+			_messageBufferMutex.ReleaseMutex();
 		}
 
 		// Write to the pipe
-		private void FlowOut() {
+		public void FlowOut(string message) {
 			
+			// Send the SYNC message to let recipient know a new message is being sent
+			_pipeOutWriter.WriteLine("SYNC");
+			_pipeOut.WaitForPipeDrain();
+
+			// Send the message
+			_pipeOutWriter.WriteLine(message);
+			_pipeOutWriter.WriteLine("END");
+			_pipeOutWriter.Flush();
 		}
 
 	}
