@@ -39,6 +39,12 @@ namespace Mario {
 			_pipeSettings = pipeSettings;
 		}
 
+		public Pipe() {
+			
+			// Set pipe settings to default values
+			_pipeSettings = new PipeSettings();
+		}
+
 		// Starts the transfer of data
 		public void Start() {
 			
@@ -193,7 +199,8 @@ namespace Mario {
 			
 			// Send the SYNC message to let recipient know a new message is being sent
 			_pipeOutWriter.WriteLine("SYNC");
-			_pipeOut.WaitForPipeDrain();
+			// TODO: Test to make sure this line isn't needed
+			//_pipeOut.WaitForPipeDrain();
 
 			// Send the message(s)
 			foreach(string message in messages) {
